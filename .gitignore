@@ -1,0 +1,5 @@
+.psc-ide-port
+.purs-repl
+output
+dist
+.spago
