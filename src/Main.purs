@@ -3,13 +3,13 @@ module Main where
 import Prelude
 import Data.Argonaut ((.:), (.:?), (:=), (:=?), (~>), (~>?))
 import Data.Argonaut as A
+import Data.Array (head)
 import Data.Either (Either(..))
 import Data.Foldable (elem)
-import Data.HTTP.Method (Method(..))
-import Data.Maybe (Maybe(..), fromMaybe, isJust, maybe)
+import Data.Maybe (Maybe(..), fromMaybe, maybe)
 import Data.Symbol (SProxy(..))
 import Effect (Effect)
-import Effect.Aff.Class (class MonadAff, liftAff)
+import Effect.Aff.Class (class MonadAff)
 import Effect.Class (class MonadEffect)
 import Effect.Console (log)
 import Foreign.Object (Object, delete, empty, insert, keys, lookup, member)
@@ -21,7 +21,6 @@ import Halogen.HTML.Properties as HP
 import Halogen.Themes.Bootstrap4 as BS
 import Halogen.VDom.Driver (runUI)
 import Marked as Marked
-import Web.Event.Event (preventDefault)
 import Web.Event.Event as W
 import Web.UIEvent.MouseEvent (toEvent)
 
@@ -292,7 +291,11 @@ editor =
       source <- H.gets _.sourceFile
       case A.jsonParser source >>= A.decodeJson of
         Left error -> H.liftEffect $ log $ "File loading failed: " <> error
-        Right result -> H.modify_ _ { dictionary = result }
+        Right result -> do
+          H.modify_ _ { dictionary = result }
+          case head $ keys result of
+            Nothing -> pure unit
+            Just h -> handleAction $ KeyChanged h
     GenerateFile -> do
       dic <- H.gets _.dictionary
       handleAction $ SourceFile $ A.encodeJson dic # A.stringify
