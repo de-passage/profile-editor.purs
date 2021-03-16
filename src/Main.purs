@@ -8,7 +8,7 @@ import Data.Symbol (SProxy(..))
 import Effect (Effect)
 import Effect.Class (class MonadEffect)
 import Effect.Console (log)
-import Foreign.Object (Object, empty, insert, keys, lookup)
+import Foreign.Object (Object, delete, empty, insert, keys, lookup, member)
 import Halogen as H
 import Halogen.Aff (awaitBody, runHalogenAff)
 import Halogen.HTML as HH
@@ -17,6 +17,7 @@ import Halogen.HTML.Properties as HP
 import Halogen.Themes.Bootstrap4 as BS
 import Halogen.VDom.Driver (runUI)
 import Marked as Marked
+import Web.Event.Event (preventDefault)
 import Web.Event.Event as W
 import Web.UIEvent.MouseEvent (toEvent)
 
@@ -69,7 +70,8 @@ _marked = SProxy :: SProxy "marked"
 data Action
   = TextChanged (State -> State)
   | KeyChanged String
-  | Save
+  | Save String
+  | Delete String
   | PreventDefault W.Event (Maybe Action)
 
 class UpdateState a b where
@@ -132,6 +134,8 @@ editor =
   render :: State -> H.ComponentHTML Action ChildSlots m
   render state =
     let
+      currenKeySaved = maybe false (\k -> member k state.dictionary) state.currentKey
+
       ks = keys state.dictionary
 
       ksOptions = map (\k -> HH.option [ HP.selected (maybe false (k == _) state.currentKey) ] [ HH.text k ]) ks
@@ -149,18 +153,33 @@ editor =
               ]
           ]
 
+      editionButtons = case state.currentKey of
+        Nothing -> []
+        Just key ->
+          if key /= "" then
+            [ HH.button [ HP.classes [ BS.btn, BS.btnOutlinePrimary ], HE.onClick $ preventDefault $ Save key ] [ HH.text "Save" ]
+            ]
+              <> if (member key state.dictionary) then
+                  [ HH.button [ HP.classes [ BS.btn, BS.btnOutlineDanger ], HE.onClick $ preventDefault $ Delete key ] [ HH.text "Delete" ]
+                  ]
+                else
+                  []
+          else
+            []
+
       newKey =
         HH.div [ HP.classes [ BS.formGroup ] ]
-          [ HH.label [ HP.for "newkey" ] [ HH.text "New Key" ]
-          , HH.input
-              [ HP.class_ BS.formControl
-              , HP.type_ HP.InputText
-              , HP.id_ "newkey"
-              , HE.onValueInput $ Just <<< KeyChanged
-              , HP.value $ fromMaybe "" state.currentKey
-              ]
-          , HH.button [ HE.onClick $ preventDefault Save ] [ HH.text "Save" ]
-          ]
+          ( [ HH.label [ HP.for "newkey" ] [ HH.text "New Key" ]
+            , HH.input
+                [ HP.class_ BS.formControl
+                , HP.type_ HP.InputText
+                , HP.id_ "newkey"
+                , HE.onValueInput $ Just <<< KeyChanged
+                , HP.value $ fromMaybe "" state.currentKey
+                ]
+            ]
+              <> editionButtons
+          )
 
       inputs = case state.currentKey of
         Nothing -> [ newKey ]
@@ -195,7 +214,6 @@ editor =
   handleAction :: forall output. Action -> H.HalogenM State Action ChildSlots output m Unit
   handleAction = case _ of
     TextChanged change -> do
-      H.liftEffect $ log "Text changed"
       H.modify_ change
     KeyChanged key -> do
       dic <- H.gets _.dictionary
@@ -203,16 +221,16 @@ editor =
       case lookup key dic of
         Just (LocStr loc) -> H.modify_ $ updateState en loc.en >>> updateState fr loc.fr >>> updateState ja loc.ja
         Nothing -> H.modify_ $ updateState en (mempty :: Text En) >>> updateState fr (Nothing :: Maybe (Text Fr)) >>> updateState ja (Nothing :: Maybe (Text Jp))
-    Save -> do
-      { dictionary, currentEn, currentFr, currentJp, currentKey } <- H.get
-      case currentKey of
-        Nothing -> pure unit
-        Just key -> do
-          let
-            locstr = LocStr { en: currentEn, fr: currentFr, ja: currentJp }
+    Save key -> do
+      { dictionary, currentEn, currentFr, currentJp } <- H.get
+      let
+        locstr = LocStr { en: currentEn, fr: currentFr, ja: currentJp }
 
-            newDic = insert key locstr dictionary
-          H.modify_ _ { dictionary = newDic }
+        newDic = insert key locstr dictionary
+      H.modify_ _ { dictionary = newDic }
+    Delete key -> do
+      dic <- H.gets _.dictionary
+      H.modify_ _ { dictionary = delete key dic, currentKey = Nothing, currentEn = mempty :: Text En, currentFr = Nothing, currentJp = Nothing }
     PreventDefault event act -> defaultPrevented event act handleAction
 
   defaultPrevented ::
