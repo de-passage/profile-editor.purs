@@ -4,16 +4,32 @@
   "description": "Simple text editor utility",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "check": "spago build",
+    "check:watch": "spago build --watch",
+    "test": "spago test --main Test.Main",
+    "build": "webpack --config webpack.prod.js",
+    "serve": "webpack-dev-server --config webpack.dev.js --open",
+    "build:dev": "webpack --config webpack.dev.js"
   },
   "repository": {
     "type": "git",
-    "url": "editor.purs"
+    "url": "git+https://github.com/de-passage/profile-editor.purs.git"
   },
   "keywords": [
     "editor",
     "markdown"
   ],
   "author": "Sylvain Leclercq",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "marked": "^2.0.1",
+    "webpack": "^4.43.0",
+    "webpack-cli": "^4.5.0",
+    "webpack-dev-server": "^3.11.2",
+    "webpack-merge": "^4.2.2"
+  },
+  "dependencies": {
+    "purs-loader": "^3.7.1",
+    "require": "^2.4.20"
+  }
 }
