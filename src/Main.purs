@@ -1,11 +1,15 @@
 module Main where
 
 import Prelude
+import Data.Argonaut ((.:), (.:?), (:=), (:=?), (~>), (~>?))
 import Data.Argonaut as A
+import Data.Either (Either(..))
 import Data.Foldable (elem)
+import Data.HTTP.Method (Method(..))
 import Data.Maybe (Maybe(..), fromMaybe, isJust, maybe)
 import Data.Symbol (SProxy(..))
 import Effect (Effect)
+import Effect.Aff.Class (class MonadAff, liftAff)
 import Effect.Class (class MonadEffect)
 import Effect.Console (log)
 import Foreign.Object (Object, delete, empty, insert, keys, lookup, member)
@@ -60,7 +64,13 @@ instance monoidText :: Monoid (Text a) where
   mempty = Text mempty
 
 type State
-  = { dictionary :: Dictionary, currentKey :: Maybe String, currentEn :: Text En, currentJp :: Maybe (Text Jp), currentFr :: Maybe (Text Fr) }
+  = { dictionary :: Dictionary
+    , currentKey :: Maybe String
+    , currentEn :: Text En
+    , currentJp :: Maybe (Text Jp)
+    , currentFr :: Maybe (Text Fr)
+    , sourceFile :: String
+    }
 
 type ChildSlots
   = ( marked :: Marked.Slot Int )
@@ -73,6 +83,9 @@ data Action
   | Save String
   | Delete String
   | PreventDefault W.Event (Maybe Action)
+  | SourceFile String
+  | LoadFile
+  | GenerateFile
 
 class UpdateState a b where
   updateState :: LProxy a -> b -> State -> State
@@ -107,6 +120,29 @@ instance fromStateJa :: FromState Jp String where
 instance fromStateEn :: FromState En String where
   fromState _ = _.currentEn >>> fromText
 
+instance decodeJsonText :: A.DecodeJson (Text a) where
+  decodeJson json = Text <$> A.decodeJson json
+
+instance encodeJsonText :: A.EncodeJson (Text a) where
+  encodeJson (Text str) = A.encodeJson str
+
+instance decodeJsonLocStr :: A.DecodeJson LocStr where
+  decodeJson json = do
+    obj <- A.decodeJson json
+    en_ <- obj .: "en"
+    fr_ <- obj .:? "fr"
+    ja_ <- obj .:? "ja"
+    pure $ LocStr { en: en_, fr: fr_, ja: ja_ }
+
+instance encodeJsonLocStrin :: A.EncodeJson LocStr where
+  encodeJson (LocStr loc) =
+    "en" := loc.en
+      ~> "ja"
+      :=? loc.ja
+      ~>? "fr"
+      :=? loc.fr
+      ~>? A.jsonEmptyObject
+
 main :: Effect Unit
 main = do
   runHalogenAff do
@@ -114,7 +150,7 @@ main = do
     H.liftEffect $ log "done"
     runUI editor unit body
 
-editor :: forall q o m i. MonadEffect m => H.Component HH.HTML q i o m
+editor :: forall q o m i. MonadEffect m => MonadAff m => H.Component HH.HTML q i o m
 editor =
   H.mkComponent
     { initialState
@@ -129,13 +165,12 @@ editor =
     , currentEn: mempty
     , currentJp: mempty
     , currentFr: mempty
+    , sourceFile: ""
     }
 
   render :: State -> H.ComponentHTML Action ChildSlots m
   render state =
     let
-      currenKeySaved = maybe false (\k -> member k state.dictionary) state.currentKey
-
       ks = keys state.dictionary
 
       ksOptions = map (\k -> HH.option [ HP.selected (maybe false (k == _) state.currentKey) ] [ HH.text k ]) ks
@@ -181,29 +216,49 @@ editor =
               <> editionButtons
           )
 
+      keySelection =
+        HH.div [ HP.classes [ BS.formGroup ] ]
+          [ HH.label [ HP.for "keyselection" ] [ HH.text "Keys" ]
+          , HH.select
+              [ HE.onValueChange $ Just <<< KeyChanged
+              , HP.id_ "keyselection"
+              , HP.class_ BS.formControl
+              , HP.value $ maybe "" (\v -> if v `elem` ks then v else "") state.currentKey
+              ]
+              ksOptions
+          ]
+
       inputs = case state.currentKey of
-        Nothing -> [ newKey ]
+        Nothing -> []
         Just currKey ->
-          [ newKey
-          , lngInput "en-input" "English" en 0
+          [ lngInput "en-input" "English" en 0
           , lngInput "fr-input" "French" fr 1
           , lngInput "ja-input" "Japanese" ja 2
+          ]
+
+      jsonFile =
+        HH.form_
+          [ HH.div [ HP.classes [ BS.formGroup, BS.row ] ]
+              [ HH.div [ HP.class_ BS.col12 ]
+                  [ HH.label [ HP.for "targeturl" ] [ HH.text "JSON" ]
+                  , HH.textarea [ HE.onValueChange $ Just <<< SourceFile, HP.id_ "targetUrl", HP.class_ BS.formControl, HP.value state.sourceFile ]
+                  ]
+              ]
+          , HH.div [ HP.classes [ BS.formGroup, BS.row ] ]
+              [ HH.div [ HP.class_ BS.col12 ]
+                  [ HH.button [ HP.classes [ BS.btn, BS.btnOutlinePrimary ], HE.onClick $ preventDefault $ LoadFile ] [ HH.text "Load" ]
+                  , HH.button [ HP.classes [ BS.btn, BS.btnOutlinePrimary ], HE.onClick $ preventDefault $ GenerateFile ] [ HH.text "Generate" ]
+                  ]
+              ]
           ]
     in
       HH.div [ HP.class_ BS.container ]
         [ HH.div [ HP.class_ BS.row ]
             [ HH.div [ HP.class_ BS.col12 ]
-                [ HH.form_
-                    ( [ HH.div [ HP.classes [ BS.formGroup ] ]
-                          [ HH.label [ HP.for "keyselection" ] [ HH.text "Keys" ]
-                          , HH.select
-                              [ HE.onValueChange $ Just <<< KeyChanged
-                              , HP.id_ "keyselection"
-                              , HP.class_ BS.formControl
-                              , HP.value $ maybe "" (\v -> if v `elem` ks then v else "") state.currentKey
-                              ]
-                              ksOptions
-                          ]
+                [ jsonFile
+                , HH.form_
+                    ( [ keySelection
+                      , newKey
                       ]
                         <> inputs
                     )
@@ -232,6 +287,15 @@ editor =
       dic <- H.gets _.dictionary
       H.modify_ _ { dictionary = delete key dic, currentKey = Nothing, currentEn = mempty :: Text En, currentFr = Nothing, currentJp = Nothing }
     PreventDefault event act -> defaultPrevented event act handleAction
+    SourceFile url -> H.modify_ _ { sourceFile = url }
+    LoadFile -> do
+      source <- H.gets _.sourceFile
+      case A.jsonParser source >>= A.decodeJson of
+        Left error -> H.liftEffect $ log $ "File loading failed: " <> error
+        Right result -> H.modify_ _ { dictionary = result }
+    GenerateFile -> do
+      dic <- H.gets _.dictionary
+      handleAction $ SourceFile $ A.encodeJson dic # A.stringify
 
   defaultPrevented ::
     forall s a c o1 m1.
