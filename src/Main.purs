@@ -2,12 +2,13 @@ module Main where
 
 import Prelude
 import Data.Argonaut as A
+import Data.Foldable (elem)
 import Data.Maybe (Maybe(..), fromMaybe, isJust, maybe)
 import Data.Symbol (SProxy(..))
 import Effect (Effect)
 import Effect.Class (class MonadEffect)
 import Effect.Console (log)
-import Foreign.Object (Object, empty, keys, lookup)
+import Foreign.Object (Object, empty, insert, keys, lookup)
 import Halogen as H
 import Halogen.Aff (awaitBody, runHalogenAff)
 import Halogen.HTML as HH
@@ -16,6 +17,8 @@ import Halogen.HTML.Properties as HP
 import Halogen.Themes.Bootstrap4 as BS
 import Halogen.VDom.Driver (runUI)
 import Marked as Marked
+import Web.Event.Event as W
+import Web.UIEvent.MouseEvent (toEvent)
 
 newtype LocStr
   = LocStr { en :: Text En, ja :: Maybe (Text Jp), fr :: Maybe (Text Fr) }
@@ -66,12 +69,14 @@ _marked = SProxy :: SProxy "marked"
 data Action
   = TextChanged (State -> State)
   | KeyChanged String
+  | Save
+  | PreventDefault W.Event (Maybe Action)
 
 class UpdateState a b where
   updateState :: LProxy a -> b -> State -> State
 
 instance updateStateFr :: UpdateState Fr String where
-  updateState _ str = _ { currentFr = Just $ Text str }
+  updateState _ str = if str /= "" then _ { currentFr = Just $ Text str } else _ { currentFr = Nothing }
 
 instance updateStateEn :: UpdateState En String where
   updateState _ str = _ { currentEn = Text str }
@@ -133,16 +138,28 @@ editor =
 
       lngInput :: forall a. UpdateState a String => FromState a String => String -> String -> LProxy a -> Int -> H.ComponentHTML Action ChildSlots m
       lngInput id title lang n =
-        HH.div [ HP.class_ BS.formGroup ]
-          [ HH.label [ HP.for id ] [ HH.text title ]
-          , HH.input [ HP.type_ HP.InputText, HP.id_ id, HP.class_ BS.formControl, HE.onValueChange (\str -> Just (TextChanged $ updateState lang str)) ]
-          , HH.slot _marked n Marked.component { text: fromState lang state, id: id } absurd
+        HH.div [ HP.classes [ BS.formGroup, BS.row ] ]
+          [ HH.div [ HP.class_ BS.col6 ]
+              [ HH.label [ HP.for id ] [ HH.text title ]
+              , HH.textarea [ HP.id_ id, HP.class_ BS.formControl, HE.onValueInput (\str -> Just (TextChanged $ updateState lang str)), HP.value $ fromState lang state ]
+              ]
+          , HH.div
+              [ HP.class_ BS.col6 ]
+              [ HH.slot _marked n Marked.component { text: fromState lang state, id: id } absurd
+              ]
           ]
 
       newKey =
         HH.div [ HP.classes [ BS.formGroup ] ]
           [ HH.label [ HP.for "newkey" ] [ HH.text "New Key" ]
-          , HH.input [ HP.type_ HP.InputText, HP.id_ "newkey", HE.onValueChange $ Just <<< KeyChanged ]
+          , HH.input
+              [ HP.class_ BS.formControl
+              , HP.type_ HP.InputText
+              , HP.id_ "newkey"
+              , HE.onValueInput $ Just <<< KeyChanged
+              , HP.value $ fromMaybe "" state.currentKey
+              ]
+          , HH.button [ HE.onClick $ preventDefault Save ] [ HH.text "Save" ]
           ]
 
       inputs = case state.currentKey of
@@ -158,19 +175,25 @@ editor =
         [ HH.div [ HP.class_ BS.row ]
             [ HH.div [ HP.class_ BS.col12 ]
                 [ HH.form_
-                    [ HH.div [ HP.classes [ BS.formGroup, BS.row ] ]
-                        ( [ HH.label [ HP.for "keyselection" ] [ HH.text "Keys" ]
-                          , HH.select [ HP.id_ "keyselection", HP.class_ BS.formControl ] ksOptions
+                    ( [ HH.div [ HP.classes [ BS.formGroup ] ]
+                          [ HH.label [ HP.for "keyselection" ] [ HH.text "Keys" ]
+                          , HH.select
+                              [ HE.onValueChange $ Just <<< KeyChanged
+                              , HP.id_ "keyselection"
+                              , HP.class_ BS.formControl
+                              , HP.value $ maybe "" (\v -> if v `elem` ks then v else "") state.currentKey
+                              ]
+                              ksOptions
                           ]
-                            <> inputs
-                        )
-                    ]
+                      ]
+                        <> inputs
+                    )
                 ]
             ]
         ]
 
   handleAction :: forall output. Action -> H.HalogenM State Action ChildSlots output m Unit
-  handleAction action = case action of
+  handleAction = case _ of
     TextChanged change -> do
       H.liftEffect $ log "Text changed"
       H.modify_ change
@@ -179,4 +202,25 @@ editor =
       H.modify_ _ { currentKey = Just key }
       case lookup key dic of
         Just (LocStr loc) -> H.modify_ $ updateState en loc.en >>> updateState fr loc.fr >>> updateState ja loc.ja
+        Nothing -> H.modify_ $ updateState en (mempty :: Text En) >>> updateState fr (Nothing :: Maybe (Text Fr)) >>> updateState ja (Nothing :: Maybe (Text Jp))
+    Save -> do
+      { dictionary, currentEn, currentFr, currentJp, currentKey } <- H.get
+      case currentKey of
         Nothing -> pure unit
+        Just key -> do
+          let
+            locstr = LocStr { en: currentEn, fr: currentFr, ja: currentJp }
+
+            newDic = insert key locstr dictionary
+          H.modify_ _ { dictionary = newDic }
+    PreventDefault event act -> defaultPrevented event act handleAction
+
+  defaultPrevented ::
+    forall s a c o1 m1.
+    MonadEffect m1 =>
+    W.Event -> Maybe a -> (a -> H.HalogenM s a c o1 m1 Unit) -> H.HalogenM s a c o1 m1 Unit
+  defaultPrevented event action handle = do
+    H.liftEffect $ W.preventDefault event
+    maybe (pure unit) handle action
+
+  preventDefault action event = Just $ PreventDefault (toEvent event) $ Just action
