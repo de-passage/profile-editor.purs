@@ -2,7 +2,7 @@ module Main where
 
 import Prelude
 import Data.Argonaut as A
-import Data.Maybe (Maybe(..), isJust, maybe)
+import Data.Maybe (Maybe(..), fromMaybe, isJust, maybe)
 import Data.Symbol (SProxy(..))
 import Effect (Effect)
 import Effect.Class (class MonadEffect)
@@ -88,6 +88,18 @@ instance updateStateTextEn :: UpdateState En (Text En) where
 instance updateStateTextJp :: UpdateState Jp (Maybe (Text Jp)) where
   updateState _ str = _ { currentJp = str }
 
+class FromState a b where
+  fromState :: LProxy a -> State -> b
+
+instance fromStateFr :: FromState Fr String where
+  fromState _ = _.currentFr >>> maybe "" fromText
+
+instance fromStateJa :: FromState Jp String where
+  fromState _ = _.currentJp >>> maybe "" fromText
+
+instance fromStateEn :: FromState En String where
+  fromState _ = _.currentEn >>> fromText
+
 main :: Effect Unit
 main = do
   runHalogenAff do
@@ -119,12 +131,12 @@ editor =
 
       ksOptions = map (\k -> HH.option [ HP.selected (maybe false (k == _) state.currentKey) ] [ HH.text k ]) ks
 
-      lngInput :: forall a. UpdateState a String => String -> String -> LProxy a -> Int -> H.ComponentHTML Action ChildSlots m
+      lngInput :: forall a. UpdateState a String => FromState a String => String -> String -> LProxy a -> Int -> H.ComponentHTML Action ChildSlots m
       lngInput id title lang n =
         HH.div [ HP.class_ BS.formGroup ]
           [ HH.label [ HP.for id ] [ HH.text title ]
           , HH.input [ HP.type_ HP.InputText, HP.id_ id, HP.class_ BS.formControl, HE.onValueChange (\str -> Just (TextChanged $ updateState lang str)) ]
-          , HH.slot _marked n Marked.component { text: fromText state.currentEn, id: id } absurd
+          , HH.slot _marked n Marked.component { text: fromState lang state, id: id } absurd
           ]
 
       newKey =
@@ -159,7 +171,9 @@ editor =
 
   handleAction :: forall output. Action -> H.HalogenM State Action ChildSlots output m Unit
   handleAction action = case action of
-    TextChanged change -> H.modify_ change
+    TextChanged change -> do
+      H.liftEffect $ log "Text changed"
+      H.modify_ change
     KeyChanged key -> do
       dic <- H.gets _.dictionary
       H.modify_ _ { currentKey = Just key }
